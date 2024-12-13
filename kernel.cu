@@ -269,10 +269,10 @@ __global__ void bounceKernel() {
 	int index = threadIdx.x + blockIdx.x * blockDim.x;
 	int passes = num_triangles / triangles_per_load + 1;
 	ray r = rays[index];
+	int x, y;
+	x = index % scr_w;
+	y = index / scr_w;
 	for (int iteration = 0; iteration < num_frames; iteration++) {
-		int x, y;
-		x = index % scr_w;
-		y = index / scr_w;
 		r.origin.x = x;
 		r.origin.y = y;
 		r.origin.z = 0.0f;
@@ -293,17 +293,14 @@ __global__ void bounceKernel() {
 				}
 				__syncthreads();
 				float tmp = p * triangles_per_load;
-
-#pragma unroll
 				for (int ti = 0; ti < triangles_per_load && (ti + tmp) < num_triangles; ti++) {
-					triangle t = tempLoader[ti];
-					float disc = dot(r.direction, t.nv);
+					float disc = dot(r.direction, tempLoader[ti].nv);
 					if (disc == 0.0f) { continue; }
 					float3 temp_sub;
-					temp_sub.x = t.p1.x - r.origin.x;
-					temp_sub.y = t.p1.y - r.origin.y;
-					temp_sub.z = t.p1.z - r.origin.z;
-					float tmp_dt = __fdividef(dot(t.nv, temp_sub), disc);
+					temp_sub.x = tempLoader[ti].p1.x - r.origin.x;
+					temp_sub.y = tempLoader[ti].p1.y - r.origin.y;
+					temp_sub.z = tempLoader[ti].p1.z - r.origin.z;
+					float tmp_dt = __fdividef(dot(tempLoader[ti].nv, temp_sub), disc);
 					float3 intersect;
 					intersect.x = r.origin.x + r.direction.x * tmp_dt;
 					intersect.y = r.origin.y + r.direction.y * tmp_dt;
@@ -312,29 +309,27 @@ __global__ void bounceKernel() {
 					temp_sub.y = intersect.y - r.origin.y;
 					temp_sub.z = intersect.z - r.origin.z;
 					float3 v2;
-					v2.x = intersect.x - t.p1.x;
-					v2.y = intersect.y - t.p1.y;
-					v2.z = intersect.z - t.p1.z;
-					float dot02 = dot(t.sb21, v2);
-					float dot12 = dot(t.sb31, v2);
-					float invD = __fdividef(1.0f, (t.dot2121 * t.dot3131 - t.dot2131 * t.dot2131));
-					float u = (t.dot3131 * dot02 - t.dot2131 * dot12) * invD;
-					float v = (t.dot2121 * dot12 - t.dot2131 * dot02) * invD;
-					tmp_dt = dot(temp_sub, r.direction);
-					if (t.unbounded) { goto skpcheck; }
-					if (((u < 0) || (v < 0) || (u + v > 1) || tmp_dt < 0.0f)) { continue; }
+					v2.x = intersect.x - tempLoader[ti].p1.x;
+					v2.y = intersect.y - tempLoader[ti].p1.y;
+					v2.z = intersect.z - tempLoader[ti].p1.z;
+					float dot02 = dot(tempLoader[ti].sb21, v2);
+					float dot12 = dot(tempLoader[ti].sb31, v2);
+					float u = (tempLoader[ti].dot3131 * dot02 - tempLoader[ti].dot2131 * dot12) * __fdividef(1.0f, (tempLoader[ti].dot2121 * tempLoader[ti].dot3131 - tempLoader[ti].dot2131 * tempLoader[ti].dot2131));
+					float v = (tempLoader[ti].dot2121 * dot12 - tempLoader[ti].dot2131 * dot02) * __fdividef(1.0f, (tempLoader[ti].dot2121 * tempLoader[ti].dot3131 - tempLoader[ti].dot2131 * tempLoader[ti].dot2131));
+					if (tempLoader[ti].unbounded) { goto skpcheck; }
+					if (((u < 0) || (v < 0) || (u + v > 1) || dot(temp_sub, r.direction) < 0.0f)) { continue; }
 				skpcheck:;
-					float newDist = matgnitude(temp_sub);
-					if (r.hit_triangle && (newDist >= r.last_dist)) {
+					u = matgnitude(temp_sub);
+					if (r.hit_triangle && (u >= r.last_dist)) {
 						continue;
 					}
-					r.last_dist = newDist;
+					r.last_dist = u;
 					r.last_triangle_index = ti;
 					r.last_intersect = intersect;
 					r.hit_triangle = true;
 				}
 			}
-			if (!r.hit_triangle) { return; }
+			if (!r.hit_triangle) { break; }
 			r.num_intersects++;
 			triangle t = triangles[r.last_triangle_index];
 			material m = triangle_materials[r.last_triangle_index];
@@ -350,10 +345,10 @@ __global__ void bounceKernel() {
 			c.b += m.c.b;
 			maxb = maxb < m.brightness ? m.brightness : maxb;
 		}
+		c.r *= maxb / r.num_intersects;
+		c.g *= maxb / r.num_intersects;
+		c.b *= maxb / r.num_intersects;
 		device_color_buffer[index] = c;
-		device_color_buffer[index].r *= maxb / r.num_intersects;
-		device_color_buffer[index].g *= maxb / r.num_intersects;
-		device_color_buffer[index].b *= maxb / r.num_intersects;
 	}
 	rays[index] = r;
 }
