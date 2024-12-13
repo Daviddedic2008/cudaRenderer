@@ -11,7 +11,7 @@ TODO:
 
 12/24: 
 - Fix reflection math and associated bugs
-- Reduce register usage to increase num concurrent rarps running
+- Reduce register usage to increase num concurrent warps running
 - Correctly implement --cuda_fast_math to use more efficient math instructions(__fsqrtf, __fdivf_)
 - Start setting up simple model loader(STL files) with own custom material files
 
