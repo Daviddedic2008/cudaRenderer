@@ -7,12 +7,13 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string>
+#include <iostream>
 
 #define scr_w 512
 #define scr_h 512
 
-#define num_bounces 2
-#define num_frames 1
+#define num_bounces 4
+#define num_frames 100
 
 __inline__ __device__ float3 init_float3(float x, float y, float z) {
 	float3 ret;
@@ -178,8 +179,8 @@ typedef struct {
 	bool unbounded;
 }triangle;
 
-#define num_triangles 24
-#define triangles_per_load 256
+#define num_triangles 12
+#define triangles_per_load 512
 
 __device__ triangle triangles[num_triangles];
 __device__ material triangle_materials[num_triangles];
@@ -259,107 +260,106 @@ void set_plane(float3 p1, float3 p2, float3 p3, int index) {
 	set_plane_kernel << <1, 1 >> > (p1, p2, p3, index, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f);
 }
 
-#define threads_bounce 512
+#define threads_bounce 256
 #define blocks_bounce scr_w * scr_h / threads_bounce
 
 __constant__ triangle tempLoader[triangles_per_load];
 
-__global__ void bounceKernel(int iteration) {
+__global__ void bounceKernel() {
 	int index = threadIdx.x + blockIdx.x * blockDim.x;
 	int passes = num_triangles / triangles_per_load + 1;
 	ray r = rays[index];
-	int x, y;
-	x = index % scr_w;
-	y = index / scr_w;
-	r.origin.x = x;
-	r.origin.y = y;
-	r.origin.z = 0.0f;
-	r.direction.x = x * fov;
-	r.direction.y = y * fov;
-	r.direction.z = 1.0f;
-	r.num_intersects = 0;
-	device_color_buffer[index] = init_color(0.0f, 0.0f, 0.0f);
-	max_brightness_buffer[index] = 0.0f;
-	float maxb = 0.0f;
-	for (int b = 0; b < num_bounces; b++) {
-		r.last_dist = -1.0f;
-		r.last_triangle_index = -1;
-		r.hit_triangle = false;
-		for (int p = 0; p < passes; p++) {
-			int tid = p * triangles_per_load + index;
-			if (tid < num_triangles && tid < triangles_per_load) {
-				tempLoader[threadIdx.x] = triangles[tid];
-			}
-			__syncthreads();
-			float tmp = p * triangles_per_load;
+	for (int iteration = 0; iteration < num_frames; iteration++) {
+		int x, y;
+		x = index % scr_w;
+		y = index / scr_w;
+		r.origin.x = x;
+		r.origin.y = y;
+		r.origin.z = 0.0f;
+		r.direction.x = x * fov;
+		r.direction.y = y * fov;
+		r.direction.z = 1.0f;
+		r.num_intersects = 0;
+		color c = init_color(0.0f, 0.0f, 0.0f);
+		float maxb = 0.0f;
+		for (int b = 0; b < num_bounces; b++) {
+			r.last_dist = -1.0f;
+			r.last_triangle_index = -1;
+			r.hit_triangle = false;
+			for (int p = 0; p < passes; p++) {
+				int tid = p * triangles_per_load + index;
+				if (tid < num_triangles && tid < triangles_per_load) {
+					tempLoader[threadIdx.x] = triangles[tid];
+				}
+				__syncthreads();
+				float tmp = p * triangles_per_load;
 
 #pragma unroll
-			for (int ti = 0; ti < triangles_per_load && (ti + tmp) < num_triangles; ti++) {
-				triangle t = tempLoader[ti];
-				float disc = dot(r.direction, t.nv);
-				if (disc == 0.0f) { continue; }
-				float3 temp_sub;
-				temp_sub.x = t.p1.x - r.origin.x;
-				temp_sub.y = t.p1.y - r.origin.y;
-				temp_sub.z = t.p1.z - r.origin.z;
-				float tmp_dt = __fdividef(dot(t.nv, temp_sub), disc);
-				float3 intersect;
-				intersect.x = r.origin.x + r.direction.x * tmp_dt;
-				intersect.y = r.origin.y + r.direction.y * tmp_dt;
-				intersect.z = r.origin.z + r.direction.z * tmp_dt;
-				temp_sub.x = intersect.x - r.origin.x;
-				temp_sub.y = intersect.y - r.origin.y;
-				temp_sub.z = intersect.z - r.origin.z;
-				float3 v2;
-				v2.x = intersect.x - t.p1.x;
-				v2.y = intersect.y - t.p1.y;
-				v2.z = intersect.z - t.p1.z;
-				float dot02 = dot(t.sb21, v2);
-				float dot12 = dot(t.sb31, v2);
-				float invD = __fdividef(1.0f, (t.dot2121 * t.dot3131 - t.dot2131 * t.dot2131));
-				float u = (t.dot3131 * dot02 - t.dot2131 * dot12) * invD;
-				float v = (t.dot2121 * dot12 - t.dot2131 * dot02) * invD;
-				tmp_dt = dot(temp_sub, r.direction);
-				if (t.unbounded) { goto skpcheck; }
-				if (((u < 0) || (v < 0) || (u + v > 1) || tmp_dt < 0.0f)) { continue; }
-			skpcheck:;
-				float newDist = matgnitude(temp_sub);
-				if (r.hit_triangle && (newDist >= r.last_dist)) {
-					continue;
+				for (int ti = 0; ti < triangles_per_load && (ti + tmp) < num_triangles; ti++) {
+					triangle t = tempLoader[ti];
+					float disc = dot(r.direction, t.nv);
+					if (disc == 0.0f) { continue; }
+					float3 temp_sub;
+					temp_sub.x = t.p1.x - r.origin.x;
+					temp_sub.y = t.p1.y - r.origin.y;
+					temp_sub.z = t.p1.z - r.origin.z;
+					float tmp_dt = __fdividef(dot(t.nv, temp_sub), disc);
+					float3 intersect;
+					intersect.x = r.origin.x + r.direction.x * tmp_dt;
+					intersect.y = r.origin.y + r.direction.y * tmp_dt;
+					intersect.z = r.origin.z + r.direction.z * tmp_dt;
+					temp_sub.x = intersect.x - r.origin.x;
+					temp_sub.y = intersect.y - r.origin.y;
+					temp_sub.z = intersect.z - r.origin.z;
+					float3 v2;
+					v2.x = intersect.x - t.p1.x;
+					v2.y = intersect.y - t.p1.y;
+					v2.z = intersect.z - t.p1.z;
+					float dot02 = dot(t.sb21, v2);
+					float dot12 = dot(t.sb31, v2);
+					float invD = __fdividef(1.0f, (t.dot2121 * t.dot3131 - t.dot2131 * t.dot2131));
+					float u = (t.dot3131 * dot02 - t.dot2131 * dot12) * invD;
+					float v = (t.dot2121 * dot12 - t.dot2131 * dot02) * invD;
+					tmp_dt = dot(temp_sub, r.direction);
+					if (t.unbounded) { goto skpcheck; }
+					if (((u < 0) || (v < 0) || (u + v > 1) || tmp_dt < 0.0f)) { continue; }
+				skpcheck:;
+					float newDist = matgnitude(temp_sub);
+					if (r.hit_triangle && (newDist >= r.last_dist)) {
+						continue;
+					}
+					r.last_dist = newDist;
+					r.last_triangle_index = ti;
+					r.last_intersect = intersect;
+					r.hit_triangle = true;
 				}
-				r.last_dist = newDist;
-				r.last_triangle_index = ti;
-				r.last_intersect = intersect;
-				r.hit_triangle = true;
 			}
+			if (!r.hit_triangle) { return; }
+			r.num_intersects++;
+			triangle t = triangles[r.last_triangle_index];
+			material m = triangle_materials[r.last_triangle_index];
+			float3 nv = t.nv;
+			float tmp_d = dot(r.direction, nv);
+			r.direction.x = -1 * r.direction.x - nv.x * 2 * tmp_d;
+			r.direction.y = -1 * r.direction.y - nv.y * 2 * tmp_d;
+			r.direction.z = -1 * r.direction.z - nv.z * 2 * tmp_d;
+			r.direction = rand_offset_float3(r.direction, nv, m.roughness, index * iteration);
+			r.origin = r.last_intersect;
+			c.r += m.c.r;
+			c.g += m.c.g;
+			c.b += m.c.b;
+			maxb = maxb < m.brightness ? m.brightness : maxb;
 		}
-		if (!r.hit_triangle) { return; }
-		r.num_intersects++;
-		triangle t = triangles[r.last_triangle_index];
-		material m = triangle_materials[r.last_triangle_index];
-		float3 nv = t.nv;
-		float tmp_d = dot(r.direction, nv);
-		r.direction.x = -1 * r.direction.x - nv.x * 2 * tmp_d;
-		r.direction.y = -1 * r.direction.y - nv.y * 2 * tmp_d;
-		r.direction.z = -1 * r.direction.z - nv.z * 2 * tmp_d;
-		r.direction = rand_offset_float3(r.direction, nv, m.roughness, index * iteration);
-		r.origin = r.last_intersect;
-		rays[index] = r;
-		color c = device_color_buffer[index];
-		c.r += m.c.r;
-		c.g += m.c.g;
-		c.b += m.c.b;
 		device_color_buffer[index] = c;
-		maxb = maxb < m.brightness ? m.brightness : maxb;
+		device_color_buffer[index].r *= maxb / r.num_intersects;
+		device_color_buffer[index].g *= maxb / r.num_intersects;
+		device_color_buffer[index].b *= maxb / r.num_intersects;
 	}
-	device_color_buffer[index].r *= maxb/r.num_intersects;
-	device_color_buffer[index].g *= maxb/r.num_intersects;
-	device_color_buffer[index].b *= maxb/r.num_intersects;
-
+	rays[index] = r;
 }
 
-void call_bounce_kernel(int iteration) {
-	bounceKernel << <threads_bounce, blocks_bounce >> > (iteration);
+void call_bounce_kernel() {
+	bounceKernel << <threads_bounce, blocks_bounce >> > ();
 }
 
 __global__ void div_colors_kernel() {
@@ -406,25 +406,45 @@ void write_pixel_data_to_txt() {
 	fclose(f);
 }
 
-void cycleRays(int iteration) {
-	call_bounce_kernel(iteration);
+void cycleRays() {
+	call_bounce_kernel();
 }
 
 int main() {
+	char dbg;
+	printf("Debug(y/n) ");
+	std::cin >> dbg;
+	bool db = dbg == 'y';
+	cudaDeviceProp props;
+	cudaGetDeviceProperties(&props, 0);
+	printf("multiprocessors on %s: %d\nthreads on %s: %d\n", props.name, props.multiProcessorCount, props.name, props.maxThreadsPerMultiProcessor * props.multiProcessorCount);
+	printf("GPU has %d registers per block\nGPU has %d total bytes const mem\n", props.regsPerBlock, props.totalConstMem);
+	printf("const mem used for triangles(should be near total): %d\n--------------------------------\n", triangles_per_load * sizeof(triangle));
 	clock_t start, end;
+	printf("starting loading %d triangles...\n", num_triangles);
 	cudaDeviceReset();
-	init_cube_CPU(make_float3(100.0f, 200.0f, 10.0f), 100.0f, 0, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f);
-	init_cube_CPU(make_float3(300.0f, 200.0f, 10.0f), 100.0f, 12, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+	init_cube_CPU(make_float3(0.0f, 512.0f, 0.0f), 512.0f, 0, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f);
+	//init_cube_CPU(make_float3(300.0f, 200.0f, 10.0f), 100.0f, 12, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+	cudaDeviceSynchronize();
+	printf("%s\n \n", "ended loading");	
+	int minBlocks = 0xffffffff;
+	int maxBlocks = 0;
 	start = clock();
-	for (int f = 0; f < num_frames; f++) {
-		cycleRays(f);
-	}
+	int maxBlocksPerSM = 0; cudaOccupancyMaxActiveBlocksPerMultiprocessor(&maxBlocksPerSM, bounceKernel, threads_bounce, 0);
+	cycleRays();
+	if (db) {
+		printf("\nblocks used by cycle: %d\n", maxBlocksPerSM * props.multiProcessorCount);
+		printf("threads used by cycle: %d\n", maxBlocksPerSM * props.multiProcessorCount * threads_bounce);
+	}	
 	cudaDeviceSynchronize();
 	end = clock();
+	printf("%d frames rendered \n \n", num_frames);
 	printf("milis for call: %d\n", end - start);
 	copy_rays_CPU();
 	copy_colors_CPU();
+	printf("copied pixel data to host\n");
 	write_pixel_data_to_txt();
+	printf("--------------------------------\nprinted colors to file\n--------------------------------\n");
 	cudaError_t progErr = cudaGetLastError();
 	printf("program ended with err: %s\n", cudaGetErrorString(progErr));
 }
