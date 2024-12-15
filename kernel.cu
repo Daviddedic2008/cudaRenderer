@@ -39,6 +39,16 @@ struct float3 {
 	}
 };
 
+// cross is more logical as its own function
+
+inline __host__ __device__ float3 cross(const float3 v1, const float3 v2) {
+	float3 ret;
+	ret.x = matrix2D_eval(v1.y, v1.z, v2.y, v2.z);
+	ret.y = matrix2D_eval(v1.x, v1.z, v2.x, v2.z);
+	ret.z = matrix2D_eval(v1.x, v1.y, v2.x, v2.y);
+	return ret;
+}
+
 
 // structs
 typedef struct {
@@ -72,6 +82,7 @@ struct triangle{
 		dot2121 = dot(sb21, sb21);
 		dot2131 = dot(sb21, sb31);
 		dot3131 = dot(sb31, sb31);
+		nv = cross(sb21, sb31);
 		unbounded = u;
 	}
 };
@@ -124,4 +135,17 @@ __inline__ __device__ __host__  intersect_return find_closest_int(const triangle
 		}
 	}
 	return ret;
+}
+
+// other stuff for kernel organization
+
+inline __device__ intersect_return get_closest_intersect_in_load(const int pass, const ray r) {
+	// wrapper, might be removed in future due to overhead
+	int id = threadIdx.x + blockIdx.x * blockDim.x;
+	if (id < triangles_per_load) {
+		triangle_loader[id] = triangles[id + pass * triangles_per_load];
+	}
+	__syncthreads();
+	int tbd = num_triangles - pass * triangles_per_load;
+	return find_closest_int(triangle_loader, r, (tbd < triangles_per_load) * (tbd - triangles_per_load) + triangles_per_load);
 }
