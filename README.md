@@ -1,6 +1,6 @@
 # cudaRenderer
 
-Currently, the following info is onyl applicable to the deprecated kernel. The newer kernel is still not finished
+Currently, the following info is only applicable to the deprecated kernel. The newer kernel is still not finished
 
 Simple renderer running on CUDA. returns output to simple r,g,b format file. Write own drawing tool or use the one provided on my other repo(pygame-renderer)
 
