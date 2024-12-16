@@ -170,6 +170,16 @@ inline __device__ intersect_return get_closest_intersect_in_load(const int pass,
 	return find_closest_int((triangle*)triangle_loader, r, (tbd < triangles_per_load) * (tbd - triangles_per_load) + triangles_per_load);
 }
 
+inline __host__ __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect) {
+	// for now just specular, adding random soon
+	float dt = dot(r.direction, nv);
+	nv =  nv * ((dt < 0.0f) * -1);
+	dt = fabs(dt);
+	r.direction = r.direction - (r.direction - nv * dt) * 2;
+	r.direction = r.direction * -1;
+	return r;
+}
+
 // test kernels(not used)
 /*
 __device__ bool hitTri;
@@ -211,6 +221,7 @@ __global__ void updateKernel(const int iteration) {
 				cd = ret.dist_from_origin;
 			}
 		}
+
 	}
 }
 
