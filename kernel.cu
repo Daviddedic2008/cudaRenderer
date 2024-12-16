@@ -13,6 +13,16 @@
 #define scr_w 512
 #define scr_h 512
 #define triangles_per_load 256
+#define passes_needed num_triangles / triangles_per_load + 1
+#define fov 0.01f
+
+// tracer related macros
+#define num_bounces 1
+#define blur 0.0f
+
+// macros for gpu params
+#define threads_main 256
+#define blocks_main scr_w * scr_h / threads_main
 
 // macros to replace functions
 #define dot(vec3_v1, vec3_v2) (vec3_v1.x * vec3_v2.x + vec3_v1.y * vec3_v2.y + vec3_v1.z * vec3_v2.z)
@@ -95,11 +105,14 @@ __device__ char triangles[num_triangles * sizeof(triangle)]; // all triangles(on
 __device__ char triangle_materials[num_triangles * sizeof(material)]; // materials corresponding to triangles
 __device__ char rays[scr_w * scr_h * sizeof(ray)];
 
+
+// constant memory is generally faster than shared if all threads need to access it(which is the case here)
 __constant__ char triangle_loader[triangles_per_load * sizeof(triangle)]; // for fast access from cached triangles
 
 typedef struct {
 	vec3 intersect;
 	bool intersect_found;
+	float dist_from_origin;
 }intersect_return;
 
 
@@ -137,6 +150,7 @@ inline  __device__ intersect_return find_closest_int(const triangle triangles_lo
 			ret.intersect_found = true;
 		}
 	}
+	ret.dist_from_origin = closest_dist;
 	return ret;
 }
 
@@ -145,16 +159,19 @@ inline  __device__ intersect_return find_closest_int(const triangle triangles_lo
 inline __device__ intersect_return get_closest_intersect_in_load(const int pass, const ray r) {
 	// wrapper, might be removed in future due to overhead
 	int id = threadIdx.x + blockIdx.x * blockDim.x;
+
+	// load triangles into cached mem
 	if (id < triangles_per_load) {
 		((triangle*)triangle_loader)[id] = ((triangle*)triangles)[id + pass * triangles_per_load];
 	}
 	__syncthreads();
+
 	int tbd = num_triangles - pass * triangles_per_load;
 	return find_closest_int((triangle*)triangle_loader, r, (tbd < triangles_per_load) * (tbd - triangles_per_load) + triangles_per_load);
 }
 
-// test kernels
-
+// test kernels(not used)
+/*
 __device__ bool hitTri;
 __global__ void test_int() {
 	ray r = ray(vec3(0.0f, 0.0f, 0.0f), vec3(0.0f, 0.0f, 1.0f));
@@ -167,9 +184,36 @@ void add_triangle_test() {
 	((triangle*)triangle2)[0] = triangle(vec3(0.0f, 0.0f, 1.0f), vec3(0.0f, 100.0f, 1.0f), vec3(100.0f, 100.0f, 1.0f), false);
 	cudaMemcpyToSymbol(triangles, triangle2, sizeof(triangle2));
 }
+*/
+
+inline __device__ ray initialize_rays(const int idx) {
+	int x, y;
+	x = idx % scr_w - scr_w / 2;
+	y = idx / scr_w - scr_h / 2;
+	return ray(vec3(x, y, 0.0f), vec3(x * fov, y * fov, 1.0f));
+}
+
+// kernel!
+
+__global__ void updateKernel(const int iteration) {
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	// init ray at starting point
+	ray r = initialize_rays(idx);
+
+	intersect_return ret, temp;
+	for (int b = 0; b < num_bounces; b++) {
+		float cd = -1.0f;
+		// get closest intersect from all triangles(no bvh for now)
+		for (int p = 0; p < passes_needed; p++) {
+			temp = get_closest_intersect_in_load(p, r);
+			if (cd < 0.0f || temp.dist_from_origin < cd) {
+				ret = temp;
+				cd = ret.dist_from_origin;
+			}
+		}
+	}
+}
 
 int main() {
-	add_triangle_test();
-	test_int << <1, 1 >> > ();
-	bool hitcpu; // test var
+	;
 }
