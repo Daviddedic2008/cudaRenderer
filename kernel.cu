@@ -109,7 +109,7 @@ union fbitwise {
 };
 
 // intersect funcs that will be put in kernel
-__inline__ __device__ intersect_return find_closest_int(const triangle triangles_loaded[triangles_per_load], const ray r, const int tris_read) {
+inline  __device__ intersect_return find_closest_int(const triangle triangles_loaded[triangles_per_load], const ray r, const int tris_read) {
 	intersect_return ret;
 	ret.intersect_found = false;
 	float closest_dist = -1.0f;
@@ -151,4 +151,25 @@ inline __device__ intersect_return get_closest_intersect_in_load(const int pass,
 	__syncthreads();
 	int tbd = num_triangles - pass * triangles_per_load;
 	return find_closest_int((triangle*)triangle_loader, r, (tbd < triangles_per_load) * (tbd - triangles_per_load) + triangles_per_load);
+}
+
+// test kernels
+
+__device__ bool hitTri;
+__global__ void test_int() {
+	ray r = ray(vec3(0.0f, 0.0f, 0.0f), vec3(0.0f, 0.0f, 1.0f));
+	hitTri = get_closest_intersect_in_load(0, r).intersect_found;
+	printf("%d\n", hitTri);
+}
+
+void add_triangle_test() {
+	char triangle2[sizeof(triangle)];
+	((triangle*)triangle2)[0] = triangle(vec3(0.0f, 0.0f, 1.0f), vec3(0.0f, 100.0f, 1.0f), vec3(100.0f, 100.0f, 1.0f), false);
+	cudaMemcpyToSymbol(triangles, triangle2, sizeof(triangle2));
+}
+
+int main() {
+	add_triangle_test();
+	test_int << <1, 1 >> > ();
+	bool hitcpu; // test var
 }

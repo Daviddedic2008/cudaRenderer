@@ -405,6 +405,7 @@ void cycleRays() {
 	call_bounce_kernel();
 }
 
+/*
 int main() {
 	char dbg;
 	printf("Debug(y/n) ");
@@ -443,3 +444,4 @@ int main() {
 	cudaError_t progErr = cudaGetLastError();
 	printf("program ended with err: %s\n", cudaGetErrorString(progErr));
 }
+*/
