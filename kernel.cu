@@ -18,6 +18,7 @@
 
 // tracer related macros
 #define num_bounces 1
+#define num_frames 1000
 #define blur 0.0f
 
 // macros for gpu params
@@ -69,9 +70,18 @@ inline __host__ __device__ vec3 cross(const vec3 v1, const vec3 v2) {
 
 
 // structs
-typedef struct {
+struct color{
 	float r, g, b;
-}color;
+	__host__ __device__ color(float R, float G, float B) : r(R), g(G), b(B){}
+
+	inline __host__ __device__ color operator+(const color& f) const {
+		return color(r + f.r, g + f.g, b + f.b);
+	}
+
+	inline __host__ __device__ color operator*(const float f) const {
+		return color(r * f, g * f, b * f);
+	}
+};
 
 typedef struct {
 	color c;
@@ -111,7 +121,7 @@ struct triangle{
 // init as chars to bypass restrictions on dynamic initialization
 __device__ char triangles[num_triangles * sizeof(triangle)]; // all triangles(on global mem, so slow access)
 __device__ char triangle_materials[num_triangles * sizeof(material)]; // materials corresponding to triangles
-__device__ char rays[scr_w * scr_h * sizeof(ray)];
+__device__ char* screen_buffer;
 
 
 // constant memory is generally faster than shared if all threads need to access it(which is the case here)
@@ -119,8 +129,9 @@ __constant__ char triangle_loader[triangles_per_load * sizeof(triangle)]; // for
 
 typedef struct {
 	vec3 intersect;
-	bool intersect_found;
+	int triangle_index;
 	float dist_from_origin;
+	vec3 nv;
 }intersect_return;
 
 
@@ -132,7 +143,7 @@ union fbitwise {
 // intersect funcs that will be put in kernel
 inline  __device__ intersect_return find_closest_int(const triangle triangles_loaded[triangles_per_load], const ray r, const int tris_read) {
 	intersect_return ret;
-	ret.intersect_found = false;
+	ret.triangle_index = -1;
 	float closest_dist = -1.0f;
 	unsigned int closest_ind;
 	for (unsigned int t = 0; t < tris_read /*tris_read used bc not all triangles in array may be intialized*/; t++) {
@@ -152,10 +163,11 @@ inline  __device__ intersect_return find_closest_int(const triangle triangles_lo
 		float v = (triangles_loaded[t].dot2121 * dot12 - triangles_loaded[t].dot2131 * dot02) * __fdividef(1.0f, (triangles_loaded[t].dot2121 * triangles_loaded[t].dot3131 - triangles_loaded[t].dot2131 * triangles_loaded[t].dot2131));
 		if ((((u < 0) || (v < 0) || (u + v > 1) || dot(temp_sub, r.direction) < 0.0f)) && !triangles_loaded[t].unbounded) { continue; }
 		float new_dist = matgnitude(temp_sub);
-		if (new_dist < closest_dist || !ret.intersect_found) {
+		if (new_dist < closest_dist || (ret.triangle_index == -1)) {
 			closest_dist = new_dist;
 			closest_ind = t;
-			ret.intersect_found = true;
+			ret.triangle_index = t;
+			ret.nv = triangles_loaded[t].nv;
 		}
 	}
 	ret.dist_from_origin = closest_dist;
@@ -237,6 +249,16 @@ void write_pixel_data_to_txt(const color* color_buffer) {
 	fclose(f);
 }
 
+// color stuff
+
+inline __device__ void add_color(const int index, const color c) {
+	((color*)screen_buffer)[index] = ((color*)screen_buffer)[index] + c;
+}
+
+inline __device__ void scale_color(const int index, const float f) {
+	((color*)screen_buffer)[index] = ((color*)screen_buffer)[index] * f;
+}
+
 // kernel!
 
 __global__ void updateKernel(const int iteration) {
@@ -245,20 +267,53 @@ __global__ void updateKernel(const int iteration) {
 	ray r = initialize_rays(idx);
 
 	intersect_return ret, temp;
+	unsigned char num_hits = 0;
+	color c = color(0.0f, 0.0f, 0.0f);
 	for (int b = 0; b < num_bounces; b++) {
+		int tri_id = -1;
 		float cd = -1.0f;
 		// get closest intersect from all triangles(no bvh for now)
 		for (int p = 0; p < passes_needed; p++) {
 			temp = get_closest_intersect_in_load(p, r);
-			if (cd < 0.0f || temp.dist_from_origin < cd) {
+			if (temp.triangle_index != -1 && (cd < 0.0f || temp.dist_from_origin < cd)) {
 				ret = temp;
 				cd = ret.dist_from_origin;
+				tri_id = temp.triangle_index + p * triangles_per_load;
+				++num_hits;
 			}
 		}
-
+		if (tri_id == -1) {
+			break;
+		}
+		// bounces ray and does color addition to buffer
+		r = reflect_ray(r, ret.nv, ret.intersect, 0.0f, iteration);
+		c = c + ((material*)triangle_materials)[tri_id].c;
 	}
+	// divide color by total num ints
+	((color*)screen_buffer)[idx] = ((color*)screen_buffer)[idx] + (c * (1.0f / num_hits));
+}
+
+// copying func
+void copyScreenBuffer(color* c) {
+	cudaMemcpyFromSymbol(c, screen_buffer, sizeof(color) * scr_w * scr_h);
+}
+
+// tri cpu
+void add_triangle(triangle t, int idx) {
+	cudaMemcpyToSymbol(triangles, &t, sizeof(triangle), idx * sizeof(triangle));
 }
 
 int main() {
-	;
+	cudaMalloc(&screen_buffer, sizeof(color) * scr_w * scr_h);
+	cudaMemset(screen_buffer, 0, sizeof(color) * scr_w * scr_h);
+	add_triangle(triangle(vec3(0.0f, 0.0f, 1.0f), vec3(100.0f, 0.0f, 1.0f), vec3(100.0f, 100.0f, 1.0f), false), 0);
+	clock_t start, end;
+	start = clock();
+	for (int f = 0; f < num_frames; f++) {
+		updateKernel << <threads_main, blocks_main >> > (f);
+	}
+	end = clock();
+	cudaError_t e = cudaGetLastError();
+	printf("kernel calls took %d miliseconds\n", end - start);
+	printf("Kernel exited with error: %s\n", cudaGetErrorString(e));
 }
