@@ -52,7 +52,7 @@ struct vec3 {
 		return vec3(x - f.x, y - f.y, z - f.z);
 	}
 
-	inline __host__ __device__ vec3 operator*(float scalar) const {
+	inline __host__ __device__ vec3 operator*(const float scalar) const {
 		return vec3(x * scalar, y * scalar, z * scalar);
 	}
 };
@@ -216,6 +216,25 @@ inline __device__ ray initialize_rays(const int idx) {
 	x = idx % scr_w - scr_w / 2;
 	y = idx / scr_w - scr_h / 2;
 	return ray(vec3(x, y, 0.0f), vec3(x * fov, y * fov, 1.0f));
+}
+
+// reused file write func
+inline FILE* open_file(const char* filename) {
+	FILE* ret = fopen(filename, "w");
+	if (ret == NULL) {
+		printf("%s\n", "error opening file %s\n", filename);
+		return NULL;
+	}
+	return ret;
+}
+
+void write_pixel_data_to_txt(const color* color_buffer) {
+	unsigned char* pixels;
+	FILE* f = open_file("colorReturnFile.txt");
+	for (int l = 0; l < scr_w * scr_h; l++) {
+		fprintf(f, "%f,%f,%f\n", color_buffer[l].r, color_buffer[l].g, color_buffer[l].b);
+	}
+	fclose(f);
 }
 
 // kernel!
