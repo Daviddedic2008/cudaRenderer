@@ -29,6 +29,14 @@
 #define matrix2D_eval(float_a , float_b, float_c, float_d) (float_a*float_d - float_b*float_c)
 #define matgnitude(vec3_a) (sqrtf(dot(vec3_a, vec3_a)))
 
+// too lazy to set up cudas rng so i use this bad one
+inline __host__ __device__ unsigned int xorRand(int seed) {
+	seed ^= seed << 13;
+	seed ^= seed >> 17;
+	seed ^= seed << 5;
+	return seed;
+}
+
 // Define the vec3 struct
 struct vec3 {
 	float x, y, z;
@@ -170,13 +178,20 @@ inline __device__ intersect_return get_closest_intersect_in_load(const int pass,
 	return find_closest_int((triangle*)triangle_loader, r, (tbd < triangles_per_load) * (tbd - triangles_per_load) + triangles_per_load);
 }
 
-inline __host__ __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect) {
-	// for now just specular, adding random soon
+inline __host__ __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect, const float random_strength, const unsigned int iteration) {
+	// specular
 	float dt = dot(r.direction, nv);
 	nv =  nv * ((dt < 0.0f) * -1);
 	dt = fabs(dt);
 	r.direction = r.direction - (r.direction - nv * dt) * 2;
 	r.direction = r.direction * -1;
+
+	// random reflection
+	unsigned int randx, randy, randz;
+	randx = xorRand((threadIdx.x + blockIdx.x * blockDim.x) * iteration);
+	randy = randx ^ randx >> 5;
+	randz = randy ^ randy << 3;
+	r.direction = r.direction * (1 - random_strength) + cross(vec3((randx % 1000) / 1000.0f, (randy % 1000) / 1000.0f, (randz % 1000) / 1000.0f), nv) * random_strength;
 	return r;
 }
 
