@@ -178,7 +178,7 @@ inline __device__ intersect_return get_closest_intersect_in_load(const int pass,
 	return find_closest_int((triangle*)triangle_loader, r, (tbd < triangles_per_load) * (tbd - triangles_per_load) + triangles_per_load);
 }
 
-inline __host__ __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect, const float random_strength, const unsigned int iteration) {
+inline __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect, const float random_strength, const unsigned int iteration) {
 	// specular
 	float dt = dot(r.direction, nv);
 	nv =  nv * ((dt < 0.0f) * -1);
