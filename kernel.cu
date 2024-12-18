@@ -7,22 +7,23 @@
 #include <stdlib.h>
 #include <string>
 #include <iostream>
+#include "bmpwriter.h"
 
 // macros for sizes
-#define num_triangles 1
+#define num_triangles 24
 #define scr_w 512
 #define scr_h 512
 #define triangles_per_load 256
 #define passes_needed num_triangles / triangles_per_load + 1
-#define fov 0.01f
+#define fov 0.005f
 
 // tracer related macros
-#define num_bounces 1
+#define num_bounces 4
 #define num_frames 1000
-#define blur 0.0f
+#define blur 0.01f
 
 // macros for gpu params
-#define threads_main 256
+#define threads_main 512
 #define blocks_main scr_w * scr_h / threads_main
 
 // macros to replace functions
@@ -31,7 +32,7 @@
 #define matgnitude(vec3_a) (sqrtf(dot(vec3_a, vec3_a)))
 
 // too lazy to set up cudas rng so i use this bad one
-inline __host__ __device__ unsigned int xorRand(int seed) {
+inline __host__ __device__ int xorRand(unsigned int seed) {
 	seed ^= seed << 13;
 	seed ^= seed >> 17;
 	seed ^= seed << 5;
@@ -55,6 +56,11 @@ struct vec3 {
 
 	inline __host__ __device__ vec3 operator*(const float scalar) const {
 		return vec3(x * scalar, y * scalar, z * scalar);
+	}
+
+	inline __host__ __device__ vec3 normalize() {
+		const float scl = matgnitude((*this));
+		return vec3(x / scl, y / scl, z / scl);
 	}
 };
 
@@ -83,10 +89,12 @@ struct color{
 	}
 };
 
-typedef struct {
+struct material {
 	color c;
 	float brightness, roughness;
-}material;
+
+	__host__ __device__ material(color C, float B, float rough) : c(C), brightness(B), roughness(rough){}
+};
 
 struct ray{
 	vec3 origin, direction;
@@ -112,7 +120,7 @@ struct triangle{
 		dot2121 = dot(sb21, sb21);
 		dot2131 = dot(sb21, sb31);
 		dot3131 = dot(sb31, sb31);
-		nv = cross(sb21, sb31);
+		nv = cross(sb21, sb31).normalize();
 		unbounded = u;
 	}
 };
@@ -121,7 +129,7 @@ struct triangle{
 // init as chars to bypass restrictions on dynamic initialization
 __device__ char triangles[num_triangles * sizeof(triangle)]; // all triangles(on global mem, so slow access)
 __device__ char triangle_materials[num_triangles * sizeof(material)]; // materials corresponding to triangles
-__device__ char* screen_buffer;
+__device__ char screen_buffer[scr_w * scr_h * sizeof(color)];
 
 
 // constant memory is generally faster than shared if all threads need to access it(which is the case here)
@@ -150,7 +158,7 @@ inline  __device__ intersect_return find_closest_int(const triangle triangles_lo
 		fbitwise disc;
 		disc.f = dot(r.direction, triangles_loaded[t].nv);
 		float dt = disc.s && 0x7FFFFFFF; // make float positive
-		if (dt < 1e-16) { // check if the plane and ray are paralell enough to be ignored
+		if (dt <= 1e-10) { // check if the plane and ray are paralell enough to be ignored
 			continue;
 		}
 		vec3 temp_sub = triangles_loaded[t].p1 - r.origin;
@@ -181,7 +189,7 @@ inline __device__ intersect_return get_closest_intersect_in_load(const int pass,
 	int id = threadIdx.x + blockIdx.x * blockDim.x;
 
 	// load triangles into cached mem
-	if (id < triangles_per_load) {
+	if (id < triangles_per_load && id < num_triangles) {
 		((triangle*)triangle_loader)[id] = ((triangle*)triangles)[id + pass * triangles_per_load];
 	}
 	__syncthreads();
@@ -193,41 +201,28 @@ inline __device__ intersect_return get_closest_intersect_in_load(const int pass,
 inline __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect, const float random_strength, const unsigned int iteration) {
 	// specular
 	float dt = dot(r.direction, nv);
-	nv =  nv * ((dt < 0.0f) * -1);
+	nv = nv * -1 * _fdsign(dt);
 	dt = fabs(dt);
-	r.direction = r.direction - (r.direction - nv * dt) * 2;
-	r.direction = r.direction * -1;
+	const vec3 dir = (r.direction - (r.direction - nv * dt) * 2) * -1;
 
 	// random reflection
 	unsigned int randx, randy, randz;
-	randx = xorRand((threadIdx.x + blockIdx.x * blockDim.x) * iteration);
-	randy = randx ^ randx >> 5;
-	randz = randy ^ randy << 3;
-	r.direction = r.direction * (1 - random_strength) + cross(vec3((randx % 1000) / 1000.0f, (randy % 1000) / 1000.0f, (randz % 1000) / 1000.0f), nv) * random_strength;
+	randx = xorRand((threadIdx.x + blockIdx.x * blockDim.x) * (iteration+1) + 1223);
+	randy = xorRand(randx);
+	randz = xorRand(randy);
+	vec3 ran = vec3((randx % 1000) / 999.0f, (randy % 1000) / 999.0f, (randz % 1000) / 999.0f);
+	r.direction = ((dir * (1.0f - random_strength)) + ran * random_strength).normalize();
 	return r;
 }
 
-// test kernels(not used)
-/*
-__device__ bool hitTri;
-__global__ void test_int() {
-	ray r = ray(vec3(0.0f, 0.0f, 0.0f), vec3(0.0f, 0.0f, 1.0f));
-	hitTri = get_closest_intersect_in_load(0, r).intersect_found;
-	printf("%d\n", hitTri);
-}
-
-void add_triangle_test() {
-	char triangle2[sizeof(triangle)];
-	((triangle*)triangle2)[0] = triangle(vec3(0.0f, 0.0f, 1.0f), vec3(0.0f, 100.0f, 1.0f), vec3(100.0f, 100.0f, 1.0f), false);
-	cudaMemcpyToSymbol(triangles, triangle2, sizeof(triangle2));
-}
-*/
-
-inline __device__ ray initialize_rays(const int idx) {
+inline __device__ ray initialize_rays(const int idx, const int iteration) {
 	int x, y;
 	x = idx % scr_w - scr_w / 2;
 	y = idx / scr_w - scr_h / 2;
-	return ray(vec3(x, y, 0.0f), vec3(x * fov, y * fov, 1.0f));
+	const int rx = xorRand(idx * iteration);
+	const int ry = xorRand(rx);
+	const vec3 rv = vec3((rx % 1000) / 999.0f, (ry % 1000) / 999.0f, 0.0f) * blur + vec3(x * fov, y * fov, 1.0f).normalize();
+	return ray(vec3(x, y, 0.0f), rv);
 }
 
 // reused file write func
@@ -264,10 +259,11 @@ inline __device__ void scale_color(const int index, const float f) {
 __global__ void updateKernel(const int iteration) {
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	// init ray at starting point
-	ray r = initialize_rays(idx);
+	ray r = initialize_rays(idx, iteration);
 
 	intersect_return ret, temp;
 	unsigned char num_hits = 0;
+	float max_brightness = 0.0f;
 	color c = color(0.0f, 0.0f, 0.0f);
 	for (int b = 0; b < num_bounces; b++) {
 		int tri_id = -1;
@@ -286,11 +282,18 @@ __global__ void updateKernel(const int iteration) {
 			break;
 		}
 		// bounces ray and does color addition to buffer
-		r = reflect_ray(r, ret.nv, ret.intersect, 0.0f, iteration);
-		c = c + ((material*)triangle_materials)[tri_id].c;
+		material m = ((material*)triangle_materials)[tri_id];
+		r = reflect_ray(r, ret.nv, ret.intersect, m.roughness, iteration);
+		c = c + m.c;
+		if (m.brightness > 0.0f) {
+			max_brightness = m.brightness;
+			break;
+		}
 	}
+	if (num_hits == 0) { return; }
+
 	// divide color by total num ints
-	((color*)screen_buffer)[idx] = ((color*)screen_buffer)[idx] + (c * (1.0f / num_hits));
+	((color*)screen_buffer)[idx] = ((color*)screen_buffer)[idx] + (c * (1.0f / num_hits)) * max_brightness;
 }
 
 // copying func
@@ -299,21 +302,73 @@ void copyScreenBuffer(color* c) {
 }
 
 // tri cpu
-void add_triangle(triangle t, int idx) {
+void add_triangle(triangle t, int idx, material m) {
 	cudaMemcpyToSymbol(triangles, &t, sizeof(triangle), idx * sizeof(triangle));
+	cudaMemcpyToSymbol(triangle_materials, &m, sizeof(material), idx * sizeof(material));
+}
+
+void initialize_cube(float side_length, vec3 origin, material m, int idx) {
+	vec3 vertices[] = {
+		vec3(origin.x, origin.y, origin.z), vec3(origin.x + side_length, origin.y, origin.z), vec3(origin.x + side_length, origin.y + side_length, origin.z), vec3(origin.x, origin.y + side_length, origin.z), // Bottom vertices
+		vec3(origin.x, origin.y, origin.z + side_length), vec3(origin.x + side_length, origin.y, origin.z + side_length), vec3(origin.x + side_length, origin.y + side_length, origin.z + side_length), vec3(origin.x, origin.y + side_length, origin.z + side_length)  // Top vertices
+	};
+
+	add_triangle(triangle(vertices[0], vertices[1], vertices[2], false), idx, m);
+	add_triangle(triangle(vertices[0], vertices[2], vertices[3], false), idx+1, m);
+
+	add_triangle(triangle(vertices[4], vertices[5], vertices[6], false), idx+2, m);
+	add_triangle(triangle(vertices[4], vertices[6], vertices[7], false), idx+3, m);
+
+	add_triangle(triangle(vertices[0], vertices[1], vertices[5], false), idx+4, m);
+	add_triangle(triangle(vertices[0], vertices[5], vertices[4], false), idx+5, m);
+
+	add_triangle(triangle(vertices[2], vertices[3], vertices[7], false), idx+6, m);
+	add_triangle(triangle(vertices[2], vertices[7], vertices[6], false), idx+7, m);
+
+	add_triangle(triangle(vertices[0], vertices[3], vertices[7], false), idx+8, m);
+	add_triangle(triangle(vertices[0], vertices[7], vertices[4], false), idx+9, m);
+
+	add_triangle(triangle(vertices[1], vertices[2], vertices[6], false), idx+10, m);
+	add_triangle(triangle(vertices[1], vertices[6], vertices[5], false), idx+11, m);
+}
+
+
+
+// zero kernel
+__global__ void zeroBuffer() {
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	((color*)screen_buffer)[idx] = color(0.0f, 0.0f, 0.0f);
+}
+
+// div colors stuff
+__global__ void divBuffer() {
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	color c = ((color*)screen_buffer)[idx] * (1.0f/num_frames);
+	c.r = c.r > 1.0f ? 1.0f : c.r;
+	c.g = c.g > 1.0f ? 1.0f : c.g;
+	c.b = c.b > 1.0f ? 1.0f : c.b;
+	((color*)screen_buffer)[idx] = c;
 }
 
 int main() {
-	cudaMalloc(&screen_buffer, sizeof(color) * scr_w * scr_h);
-	cudaMemset(screen_buffer, 0, sizeof(color) * scr_w * scr_h);
-	add_triangle(triangle(vec3(0.0f, 0.0f, 1.0f), vec3(100.0f, 0.0f, 1.0f), vec3(100.0f, 100.0f, 1.0f), false), 0);
+	zeroBuffer << <256, scr_w* scr_h / 256 >> > ();
+	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -1.0f), material(color(0.0f, 1.0f, 0.0f), 0.0f, 0.6f), 0);
+	initialize_cube(100.0f, vec3(100.0f, 100.0f, 100.0f), material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f), 12);
 	clock_t start, end;
 	start = clock();
 	for (int f = 0; f < num_frames; f++) {
 		updateKernel << <threads_main, blocks_main >> > (f);
 	}
+	cudaDeviceSynchronize();
 	end = clock();
+	divBuffer << <256, scr_w* scr_h / 256 >> > ();
+	color* sc = (color*)malloc(sizeof(color) * scr_w * scr_h);
+	copyScreenBuffer(sc);
+	cudaDeviceSynchronize();
+	saveBMP("out.bmp", scr_w, scr_h, sc);
 	cudaError_t e = cudaGetLastError();
 	printf("kernel calls took %d miliseconds\n", end - start);
 	printf("Kernel exited with error: %s\n", cudaGetErrorString(e));
+	free(sc);
+	cudaFree(screen_buffer);
 }
