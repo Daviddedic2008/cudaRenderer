@@ -6,3 +6,7 @@ Simple path tracer written in pure CUDA, great starting project for people looki
 
 
 first successful render
+
+![image](https://github.com/user-attachments/assets/d5c7de69-0937-43b9-9fb4-873aa059410a)
+
+mirror render(dont mind the lack of bloom)
