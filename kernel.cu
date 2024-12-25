@@ -13,7 +13,7 @@
 #include <sstream>
 
 // macros for sizes
-#define num_triangles 24
+#define num_triangles 36
 #define scr_w 512
 #define scr_h 512
 #define triangles_per_load 256
@@ -22,8 +22,9 @@
 
 // tracer related macros
 #define num_bounces 4
-#define num_frames 1000
+#define num_frames 100
 #define blur 0.01f
+#define smoothing_constant 0.4
 
 // macros for gpu params
 #define threads_main 512
@@ -95,6 +96,8 @@ struct color{
 struct material {
 	color c;
 	float brightness, roughness;
+
+	__host__ __device__ material() : c(color(0.0f, 0.0f, 0.0f)){}
 
 	__host__ __device__ material(color C, float B, float rough) : c(C), brightness(B), roughness(rough){}
 };
@@ -198,7 +201,7 @@ inline __device__ intersect_return get_closest_intersect_in_load(const int pass,
 	}
 	__syncthreads();
 
-	int tbd = num_triangles - pass * triangles_per_load;
+	const int tbd = num_triangles - pass * triangles_per_load;
 	return find_closest_int((triangle*)triangle_loader, r, (tbd < triangles_per_load) * (tbd - triangles_per_load) + triangles_per_load);
 }
 
@@ -213,8 +216,8 @@ inline __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect, const fl
 	const unsigned int randx = xorRand((threadIdx.x + blockIdx.x * blockDim.x) * (iteration+1) + 1223);
 	const unsigned int randy = xorRand(randx);
 	const unsigned int randz = xorRand(randy);
-	vec3 ran = vec3((randx % 1000) / 999.0f - 0.5f, (randy % 1000) / 999.0f - 0.5f, (randz % 1000) / 999.0f - 0.5f);
-	r.direction = ((dir * (1.0f - random_strength)) + ran * random_strength).normalize();
+	const vec3 ran = vec3((randx % 1000) / 999.0f - 0.5f, (randy % 1000) / 999.0f - 0.5f, (randz % 1000) / 999.0f - 0.5f);
+	r.direction = ((dir * (1.0f - random_strength)) + ran * random_strength);
 	return r;
 }
 
@@ -264,16 +267,16 @@ __global__ void updateKernel(const int iteration) {
 	// init ray at starting point
 	ray r = initialize_rays(idx, iteration);
 
-	intersect_return ret, temp;
+	intersect_return ret;
 	unsigned char num_hits = 0;
-	float max_brightness = 0.0f;
 	color c = color(0.0f, 0.0f, 0.0f);
+	material m;
 	for (int b = 0; b < num_bounces; b++) {
 		int tri_id = -1;
 		float cd = -1.0f;
 		// get closest intersect from all triangles(no bvh for now)
 		for (int p = 0; p < passes_needed; p++) {
-			temp = get_closest_intersect_in_load(p, r);
+			const intersect_return temp = get_closest_intersect_in_load(p, r);
 			if (temp.triangle_index != -1 && (cd < 0.0f || temp.dist_from_origin < cd)) {
 				ret = temp;
 				cd = ret.dist_from_origin;
@@ -285,18 +288,17 @@ __global__ void updateKernel(const int iteration) {
 			break;
 		}
 		// bounces ray and does color addition to buffer
-		const material m = ((material*)triangle_materials)[tri_id];
+		m = ((material*)triangle_materials)[tri_id];
 		r = reflect_ray(r, ret.nv, ret.intersect, m.roughness, iteration);
-		c = c + m.c;
+		c = m.c * (smoothing_constant) + c * (1.0f-smoothing_constant);
 		if (m.brightness > 0.0f) {
-			max_brightness = m.brightness;
 			break;
 		}
 	}
 	if (num_hits == 0) { return; }
 
 	// divide color by total num ints
-	((color*)screen_buffer)[idx] = ((color*)screen_buffer)[idx] + (c * (1.0f / num_hits)) * max_brightness;
+	((color*)screen_buffer)[idx] = ((color*)screen_buffer)[idx] + c * m.brightness;
 }
 
 // copying func
@@ -334,6 +336,36 @@ void initialize_cube(float side_length, vec3 origin, material m, int idx) {
 	add_triangle(triangle(vertices[1], vertices[2], vertices[6], false), idx+10, m);
 	add_triangle(triangle(vertices[1], vertices[6], vertices[5], false), idx+11, m);
 }
+
+void initialize_cubeLight(float side_length, vec3 origin, material m1, material m2, int idx) {
+	vec3 vertices[] = {
+		vec3(origin.x, origin.y, origin.z), vec3(origin.x + side_length, origin.y, origin.z), vec3(origin.x + side_length, origin.y + side_length, origin.z), vec3(origin.x, origin.y + side_length, origin.z), // Bottom vertices
+		vec3(origin.x, origin.y, origin.z + side_length), vec3(origin.x + side_length, origin.y, origin.z + side_length), vec3(origin.x + side_length, origin.y + side_length, origin.z + side_length), vec3(origin.x, origin.y + side_length, origin.z + side_length)  // Top vertices
+	};
+
+	// Bottom
+	add_triangle(triangle(vertices[0], vertices[1], vertices[2], false), idx, m1);
+	add_triangle(triangle(vertices[0], vertices[2], vertices[3], false), idx + 1, m1);
+
+	// Top (roof)
+	add_triangle(triangle(vertices[3], vertices[2], vertices[6], false), idx + 2, m1);
+	add_triangle(triangle(vertices[3], vertices[6], vertices[7], false), idx + 3, m1);
+
+	// Sides
+	add_triangle(triangle(vertices[0], vertices[1], vertices[5], false), idx + 4, m2);
+	add_triangle(triangle(vertices[0], vertices[5], vertices[4], false), idx + 5, m2);
+
+	add_triangle(triangle(vertices[2], vertices[1], vertices[5], false), idx + 6, m1);
+	add_triangle(triangle(vertices[2], vertices[5], vertices[6], false), idx + 7, m1);
+
+	add_triangle(triangle(vertices[0], vertices[3], vertices[7], false), idx + 8, m1);
+	add_triangle(triangle(vertices[0], vertices[7], vertices[4], false), idx + 9, m1);
+
+	add_triangle(triangle(vertices[4], vertices[5], vertices[6], false), idx + 10, m1);
+	add_triangle(triangle(vertices[4], vertices[6], vertices[7], false), idx + 11, m1);
+}
+
+
 
 bool read_stl(const std::string& filename, material m, int start_idx) {
 	std::ifstream file(filename, std::ios::binary);
@@ -461,8 +493,9 @@ __global__ void divBuffer() {
 
 int main() {
 	zeroBuffer << <256, scr_w* scr_h / 256 >> > ();
-	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -1.0f), material(color(0.0f, 1.0f, 0.0f), 0.0f, 0.9f), 0);
-	initialize_cube(100.0f, vec3(-50.0f, -330.0f, 100.0f), material(color(1.0f, 1.0f, 1.0f), 20.0f, 0.0f), 12);
+	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -1.0f), material(color(0.0f, 1.0f, 0.0f), 0.0f, 0.4f), 0);
+	initialize_cube(100.0f, vec3(-200.0f, 130.0f, 100.0f), material(color(1.0f, 0.0f, 0.0f), 8.0f, 0.0f), 12);
+	initialize_cube(100.0f, vec3(100.0f, -100.0f, 100.0f), material(color(0.0f, 0.0f, 1.0f), 3.0f, 0.0f), 24);
 	//add_triangle(triangle(vec3(-11.0f, 82.0f, 3.0f), vec3(-12.0f, 80.0f, 7.0f), vec3(-3.0f, 88.0f, 7.0f), false), 13, material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f));
 
 	//readStlModelAndAddTriangles(, material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f));
