@@ -8,6 +8,9 @@
 #include <string>
 #include <iostream>
 #include "bmpwriter.h"
+#include <vector>
+#include <fstream>
+#include <sstream>
 
 // macros for sizes
 #define num_triangles 24
@@ -32,7 +35,7 @@
 #define matgnitude(vec3_a) (sqrtf(dot(vec3_a, vec3_a)))
 
 // too lazy to set up cudas rng so i use this bad one
-inline __host__ __device__ int xorRand(unsigned int seed) {
+inline __host__ __device__ long int xorRand(unsigned int seed) {
 	seed ^= seed << 13;
 	seed ^= seed >> 17;
 	seed ^= seed << 5;
@@ -131,10 +134,6 @@ __device__ char triangles[num_triangles * sizeof(triangle)]; // all triangles(on
 __device__ char triangle_materials[num_triangles * sizeof(material)]; // materials corresponding to triangles
 __device__ char screen_buffer[scr_w * scr_h * sizeof(color)];
 
-
-// constant memory is generally faster than shared if all threads need to access it(which is the case here)
-__constant__ char triangle_loader[triangles_per_load * sizeof(triangle)]; // for fast access from cached triangles
-
 typedef struct {
 	vec3 intersect;
 	int triangle_index;
@@ -157,18 +156,20 @@ inline  __device__ intersect_return find_closest_int(const triangle triangles_lo
 	for (unsigned int t = 0; t < tris_read /*tris_read used bc not all triangles in array may be intialized*/; t++) {
 		fbitwise disc;
 		disc.f = dot(r.direction, triangles_loaded[t].nv);
-		float dt = disc.s && 0x7FFFFFFF; // make float positive
+		const float dt = disc.s && 0x7FFFFFFF; // make float positive
 		if (dt <= 1e-10) { // check if the plane and ray are paralell enough to be ignored
 			continue;
 		}
 		vec3 temp_sub = triangles_loaded[t].p1 - r.origin;
 		temp_sub = r.direction * __fdividef(dot(triangles_loaded[t].nv, temp_sub), disc.f);// fast division since fastmath doesnt work on my system for some reason
 		ret.intersect = r.origin + temp_sub;
-		vec3 v2 = ret.intersect - triangles_loaded[t].p1;
-		float dot02 = dot(triangles_loaded[t].sb21, v2);
-		float dot12 = dot(triangles_loaded[t].sb31, v2);
-		float u = (triangles_loaded[t].dot3131 * dot02 - triangles_loaded[t].dot2131 * dot12) * __fdividef(1.0f, (triangles_loaded[t].dot2121 * triangles_loaded[t].dot3131 - triangles_loaded[t].dot2131 * triangles_loaded[t].dot2131));
-		float v = (triangles_loaded[t].dot2121 * dot12 - triangles_loaded[t].dot2131 * dot02) * __fdividef(1.0f, (triangles_loaded[t].dot2121 * triangles_loaded[t].dot3131 - triangles_loaded[t].dot2131 * triangles_loaded[t].dot2131));
+		const vec3 v2 = ret.intersect - triangles_loaded[t].p1;
+		const float dot02 = dot(triangles_loaded[t].sb21, v2);
+		const float dot12 = dot(triangles_loaded[t].sb31, v2);
+		const float disc2 = (triangles_loaded[t].dot2121 * triangles_loaded[t].dot3131 - triangles_loaded[t].dot2131 * triangles_loaded[t].dot2131);
+		if (disc2 == 0.0f) { continue; }
+		const float u = (triangles_loaded[t].dot3131 * dot02 - triangles_loaded[t].dot2131 * dot12) * __fdividef(1.0f, disc2);
+		const float v = (triangles_loaded[t].dot2121 * dot12 - triangles_loaded[t].dot2131 * dot02) * __fdividef(1.0f, disc2);
 		if ((((u < 0) || (v < 0) || (u + v > 1) || dot(temp_sub, r.direction) < 0.0f)) && !triangles_loaded[t].unbounded) { continue; }
 		float new_dist = matgnitude(temp_sub);
 		if (new_dist < closest_dist || (ret.triangle_index == -1)) {
@@ -184,13 +185,16 @@ inline  __device__ intersect_return find_closest_int(const triangle triangles_lo
 
 // other stuff for kernel organization
 
+__constant__ char triangle_loader[triangles_per_load * sizeof(triangle)];
+
 inline __device__ intersect_return get_closest_intersect_in_load(const int pass, const ray r) {
 	// wrapper, might be removed in future due to overhead
-	int id = threadIdx.x + blockIdx.x * blockDim.x;
+	const int id = threadIdx.x + blockIdx.x * blockDim.x;
 
 	// load triangles into cached mem
-	if (id < triangles_per_load && id < num_triangles) {
-		((triangle*)triangle_loader)[id] = ((triangle*)triangles)[id + pass * triangles_per_load];
+	// constant memory is generally faster than shared if all threads need to access it(which is the case here) // for fast access from cached triangles
+	if (id < num_triangles && id < triangles_per_load) {
+		((triangle*)triangle_loader)[threadIdx.x] = ((triangle*)triangles)[id + pass * triangles_per_load];
 	}
 	__syncthreads();
 
@@ -200,28 +204,27 @@ inline __device__ intersect_return get_closest_intersect_in_load(const int pass,
 
 inline __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect, const float random_strength, const unsigned int iteration) {
 	// specular
-	float dt = dot(r.direction, nv);
-	nv = nv * -1 * _fdsign(dt);
-	dt = fabs(dt);
+	const float dt = dot(r.direction, nv);
+	//nv = nv * -1 * signbit(dt);
+	//dt = fabs(dt);
 	const vec3 dir = (r.direction - (r.direction - nv * dt) * 2) * -1;
 
 	// random reflection
-	unsigned int randx, randy, randz;
-	randx = xorRand((threadIdx.x + blockIdx.x * blockDim.x) * (iteration+1) + 1223);
-	randy = xorRand(randx);
-	randz = xorRand(randy);
-	vec3 ran = vec3((randx % 1000) / 999.0f, (randy % 1000) / 999.0f, (randz % 1000) / 999.0f);
+	const unsigned int randx = xorRand((threadIdx.x + blockIdx.x * blockDim.x) * (iteration+1) + 1223);
+	const unsigned int randy = xorRand(randx);
+	const unsigned int randz = xorRand(randy);
+	vec3 ran = vec3((randx % 1000) / 999.0f - 0.5f, (randy % 1000) / 999.0f - 0.5f, (randz % 1000) / 999.0f - 0.5f);
 	r.direction = ((dir * (1.0f - random_strength)) + ran * random_strength).normalize();
 	return r;
 }
 
 inline __device__ ray initialize_rays(const int idx, const int iteration) {
-	int x, y;
+	float x, y;
 	x = idx % scr_w - scr_w / 2;
 	y = idx / scr_w - scr_h / 2;
 	const int rx = xorRand(idx * iteration);
 	const int ry = xorRand(rx);
-	const vec3 rv = vec3((rx % 1000) / 999.0f, (ry % 1000) / 999.0f, 0.0f) * blur + vec3(x * fov, y * fov, 1.0f).normalize();
+	const vec3 rv = vec3((rx % 1000) / 999.0f - 0.5f, (ry % 1000) / 999.0f - 0.5f, 0.0f) * blur + vec3(x * fov, y * fov, 1.0f).normalize();
 	return ray(vec3(x, y, 0.0f), rv);
 }
 
@@ -282,7 +285,7 @@ __global__ void updateKernel(const int iteration) {
 			break;
 		}
 		// bounces ray and does color addition to buffer
-		material m = ((material*)triangle_materials)[tri_id];
+		const material m = ((material*)triangle_materials)[tri_id];
 		r = reflect_ray(r, ret.nv, ret.intersect, m.roughness, iteration);
 		c = c + m.c;
 		if (m.brightness > 0.0f) {
@@ -332,6 +335,112 @@ void initialize_cube(float side_length, vec3 origin, material m, int idx) {
 	add_triangle(triangle(vertices[1], vertices[6], vertices[5], false), idx+11, m);
 }
 
+bool read_stl(const std::string& filename, material m, int start_idx) {
+	std::ifstream file(filename, std::ios::binary);
+	if (!file) {
+		std::cerr << "Failed to open file: " << filename << std::endl;
+		return false;
+	}
+
+	// Read the 80-byte header (skip it)
+	file.seekg(80, std::ios::beg);
+
+	// Read the number of triangles in the STL file
+	unsigned int numTriangles;
+	file.read(reinterpret_cast<char*>(&numTriangles), sizeof(numTriangles));
+
+	// Read each triangle
+	for (unsigned int i = 0; i < numTriangles; ++i) {
+		// Skip normal vector (3 floats)
+		float normal[3];
+		file.read(reinterpret_cast<char*>(&normal), sizeof(normal));
+
+		// Read the 3 vertices of the triangle
+		triangle t;
+		file.read(reinterpret_cast<char*>(&t.p1.x), sizeof(float));  // p1.x
+		file.read(reinterpret_cast<char*>(&t.p1.y), sizeof(float));  // p1.y
+		file.read(reinterpret_cast<char*>(&t.p1.z), sizeof(float));  // p1.z
+
+		file.read(reinterpret_cast<char*>(&t.p2.x), sizeof(float));  // p2.x
+		file.read(reinterpret_cast<char*>(&t.p2.y), sizeof(float));  // p2.y
+		file.read(reinterpret_cast<char*>(&t.p2.z), sizeof(float));  // p2.z
+
+		file.read(reinterpret_cast<char*>(&t.p3.x), sizeof(float));  // p3.x
+		file.read(reinterpret_cast<char*>(&t.p3.y), sizeof(float));  // p3.y
+		file.read(reinterpret_cast<char*>(&t.p3.z), sizeof(float));  // p3.z
+
+		// Skip attribute byte count (2 bytes)
+		unsigned short attribute;
+		file.read(reinterpret_cast<char*>(&attribute), sizeof(attribute));
+
+		// Call add_triangle with the triangle and index
+		add_triangle(t, start_idx + i, m);
+	}
+
+	file.close();
+	return true;
+}
+
+// Function to read an ASCII STL file and add triangles
+bool read_ascii_stl(const std::string& filename, material m, int start_idx) {
+	std::ifstream file(filename);
+	if (!file) {
+		std::cerr << "Failed to open file: " << filename << std::endl;
+		return false;
+	}
+
+	std::string line;
+	int idx = start_idx;
+	while (std::getline(file, line)) {
+		if (line.find("facet normal") != std::string::npos) {
+			// Skip the normal line
+			std::getline(file, line);
+
+			// Read the 3 vertices of the triangle
+			triangle t;
+			for (int i = 0; i < 3; ++i) {
+				std::getline(file, line);
+				std::stringstream ss(line);
+				std::string temp;
+				ss >> temp >> t.p1.x >> t.p1.y >> t.p1.z;
+			}
+
+			// Skip the endfacet line
+			std::getline(file, line);
+
+			// Call add_triangle with the triangle and index
+			add_triangle(t, idx++, m);
+		}
+	}
+
+	file.close();
+	return true;
+}
+
+// The wrapper function to determine the file type (binary or ASCII) and process the STL file accordingly
+bool process_stl_file(const std::string& filename, material m, int start_idx) {
+	std::ifstream file(filename, std::ios::binary);
+	if (!file) {
+		std::cerr << "Failed to open file: " << filename << std::endl;
+		return false;
+	}
+
+	char header[5];
+	file.read(header, 5);
+	file.close();
+
+	// Check if file is binary or ASCII based on the header
+	if (header[0] == 's' && header[1] == 'o' && header[2] == 'l' && header[3] == 'i' && header[4] == 'd') {
+		// Likely ASCII STL, so use the ASCII parser
+		return read_ascii_stl(filename, m, start_idx);
+	}
+	else {
+		// Binary STL, so use the binary parser
+		return read_stl(filename, m, start_idx);
+	}
+}
+
+
 
 
 // zero kernel
@@ -352,8 +461,12 @@ __global__ void divBuffer() {
 
 int main() {
 	zeroBuffer << <256, scr_w* scr_h / 256 >> > ();
-	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -1.0f), material(color(0.0f, 1.0f, 0.0f), 0.0f, 0.6f), 0);
-	initialize_cube(100.0f, vec3(100.0f, 100.0f, 100.0f), material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f), 12);
+	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -1.0f), material(color(0.0f, 1.0f, 0.0f), 0.0f, 0.9f), 0);
+	initialize_cube(100.0f, vec3(-50.0f, -330.0f, 100.0f), material(color(1.0f, 1.0f, 1.0f), 20.0f, 0.0f), 12);
+	//add_triangle(triangle(vec3(-11.0f, 82.0f, 3.0f), vec3(-12.0f, 80.0f, 7.0f), vec3(-3.0f, 88.0f, 7.0f), false), 13, material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f));
+
+	//readStlModelAndAddTriangles(, material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f));
+	//process_stl_file("C:\\Users\\david\\Downloads\\pythonAndModels\\Knight.stl", material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f), 0);
 	clock_t start, end;
 	start = clock();
 	for (int f = 0; f < num_frames; f++) {
