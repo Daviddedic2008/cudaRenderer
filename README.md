@@ -12,6 +12,7 @@ first successful render
 mirror render(dont mind the lack of bloom)
 
 ![image](https://github.com/user-attachments/assets/6185cc23-3aab-4b22-86d0-93817448ed21)
-![Uploading image.png…]()
+![image](https://github.com/user-attachments/assets/92fb58b6-8b96-4a1a-833e-041e498a6bf5)
+
 
 weird cornell box(roughness wasnt configured)
