@@ -18,10 +18,10 @@
 #define scr_h 512
 #define triangles_per_load 256
 #define passes_needed num_triangles / triangles_per_load + 1
-#define fov 0.005f
+#define fov 0.003f
 
 // tracer related macros
-#define num_bounces 4
+#define num_bounces 8
 #define num_frames 100
 #define blur 0.01f
 #define smoothing_constant 0.4
@@ -160,7 +160,7 @@ inline  __device__ intersect_return find_closest_int(const triangle triangles_lo
 		fbitwise disc;
 		disc.f = dot(r.direction, triangles_loaded[t].nv);
 		const float dt = disc.s && 0x7FFFFFFF; // make float positive
-		if (dt <= 1e-10) { // check if the plane and ray are paralell enough to be ignored
+		if (dt <= FLT_EPSILON) { // check if the plane and ray are paralell enough to be ignored
 			continue;
 		}
 		vec3 temp_sub = triangles_loaded[t].p1 - r.origin;
@@ -171,8 +171,11 @@ inline  __device__ intersect_return find_closest_int(const triangle triangles_lo
 		const float dot12 = dot(triangles_loaded[t].sb31, v2);
 		const float disc2 = (triangles_loaded[t].dot2121 * triangles_loaded[t].dot3131 - triangles_loaded[t].dot2131 * triangles_loaded[t].dot2131);
 		if (disc2 == 0.0f) { continue; }
-		const float u = (triangles_loaded[t].dot3131 * dot02 - triangles_loaded[t].dot2131 * dot12) * __fdividef(1.0f, disc2);
-		const float v = (triangles_loaded[t].dot2121 * dot12 - triangles_loaded[t].dot2131 * dot02) * __fdividef(1.0f, disc2);
+		const float fdiv = __fdividef(1.0f, disc2);
+
+		const float u = __fmul_rn(__fmaf_rn(triangles_loaded[t].dot3131, dot02, -triangles_loaded[t].dot2131 * dot12), fdiv);
+
+		const float v = __fmul_rn(__fmaf_rn(triangles_loaded[t].dot2121, dot12, -triangles_loaded[t].dot2131 * dot02), fdiv);
 		if ((((u < 0) || (v < 0) || (u + v > 1) || dot(temp_sub, r.direction) < 0.0f)) && !triangles_loaded[t].unbounded) { continue; }
 		float new_dist = matgnitude(temp_sub);
 		if (new_dist < closest_dist || (ret.triangle_index == -1)) {
@@ -193,13 +196,12 @@ __constant__ char triangle_loader[triangles_per_load * sizeof(triangle)];
 inline __device__ intersect_return get_closest_intersect_in_load(const int pass, const ray r) {
 	// wrapper, might be removed in future due to overhead
 	const int id = threadIdx.x + blockIdx.x * blockDim.x;
-
 	// load triangles into cached mem
-	// constant memory is generally faster than shared if all threads need to access it(which is the case here) // for fast access from cached triangles
+	// constant memory is generally faster than shared if all threads need to access it(which is the case here)
 	if (id < num_triangles && id < triangles_per_load) {
-		((triangle*)triangle_loader)[threadIdx.x] = ((triangle*)triangles)[id + pass * triangles_per_load];
+		((triangle*)triangle_loader)[id] = ((triangle*)triangles)[id + pass * triangles_per_load];
 	}
-	__syncthreads();
+	//__syncthreads();
 
 	const int tbd = num_triangles - pass * triangles_per_load;
 	return find_closest_int((triangle*)triangle_loader, r, (tbd < triangles_per_load) * (tbd - triangles_per_load) + triangles_per_load);
@@ -208,23 +210,20 @@ inline __device__ intersect_return get_closest_intersect_in_load(const int pass,
 inline __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect, const float random_strength, const unsigned int iteration) {
 	// specular
 	const float dt = dot(r.direction, nv);
-	//nv = nv * -1 * signbit(dt);
-	//dt = fabs(dt);
 	const vec3 dir = (r.direction - (r.direction - nv * dt) * 2) * -1;
 
 	// random reflection
 	const unsigned int randx = xorRand((threadIdx.x + blockIdx.x * blockDim.x) * (iteration+1) + 1223);
 	const unsigned int randy = xorRand(randx);
 	const unsigned int randz = xorRand(randy);
-	const vec3 ran = vec3((randx % 1000) / 999.0f - 0.5f, (randy % 1000) / 999.0f - 0.5f, (randz % 1000) / 999.0f - 0.5f);
-	r.direction = ((dir * (1.0f - random_strength)) + ran * random_strength);
+	const vec3 ran = cross(vec3((randx % 1001) / 500.0f - 1.0f, (randy % 1001) / 500.0f - 1.0f, (randz % 1001) / 500.0f - 1.0f), nv);
+	r.direction = ((dir * (1.0f - random_strength)) + ran * random_strength).normalize();
 	return r;
 }
 
 inline __device__ ray initialize_rays(const int idx, const int iteration) {
-	float x, y;
-	x = idx % scr_w - scr_w / 2;
-	y = idx / scr_w - scr_h / 2;
+	const float x = idx % scr_w - scr_w / 2;
+	const float y = idx / scr_w - scr_h / 2;
 	const int rx = xorRand(idx * iteration);
 	const int ry = xorRand(rx);
 	const vec3 rv = vec3((rx % 1000) / 999.0f - 0.5f, (ry % 1000) / 999.0f - 0.5f, 0.0f) * blur + vec3(x * fov, y * fov, 1.0f).normalize();
@@ -365,6 +364,34 @@ void initialize_cubeLight(float side_length, vec3 origin, material m1, material 
 	add_triangle(triangle(vertices[4], vertices[6], vertices[7], false), idx + 11, m1);
 }
 
+void initialize_cubeCornell(float side_length, vec3 origin, int idx) {
+	vec3 vertices[] = {
+		vec3(origin.x, origin.y, origin.z), vec3(origin.x + side_length, origin.y, origin.z), vec3(origin.x + side_length, origin.y + side_length, origin.z), vec3(origin.x, origin.y + side_length, origin.z), // Bottom vertices
+		vec3(origin.x, origin.y, origin.z + side_length), vec3(origin.x + side_length, origin.y, origin.z + side_length), vec3(origin.x + side_length, origin.y + side_length, origin.z + side_length), vec3(origin.x, origin.y + side_length, origin.z + side_length)  // Top vertices
+	};
+
+	// Bottom
+	add_triangle(triangle(vertices[0], vertices[1], vertices[2], false), idx, material(color(0.0f, 0.0f, 0.0f), 0.0f, 0.65f));
+	add_triangle(triangle(vertices[0], vertices[2], vertices[3], false), idx + 1, material(color(0.0f, 0.0f, 0.0f), 0.0f, 0.65f));
+
+	// Top (roof)
+	add_triangle(triangle(vertices[3], vertices[2], vertices[6], false), idx + 2, material(color(1.0f, 1.0f, 1.0f), 0.0f, 0.65f));
+	add_triangle(triangle(vertices[3], vertices[6], vertices[7], false), idx + 3, material(color(1.0f, 1.0f, 1.0f), 0.0f, 0.65f));
+
+	// Sides
+	add_triangle(triangle(vertices[0], vertices[1], vertices[5], false), idx + 4, material(color(1.0f, 1.0f, 1.0f), 2.0f, 0.65f));
+	add_triangle(triangle(vertices[0], vertices[5], vertices[4], false), idx + 5, material(color(1.0f, 1.0f, 1.0f), 2.0f, 0.65f));
+
+	add_triangle(triangle(vertices[2], vertices[1], vertices[5], false), idx + 6, material(color(0.0f, 1.0f, 0.0f), 0.0f, 0.65f));
+	add_triangle(triangle(vertices[2], vertices[5], vertices[6], false), idx + 7, material(color(0.0f, 1.0f, 0.0f), 0.0f, 0.65f));
+
+	add_triangle(triangle(vertices[0], vertices[3], vertices[7], false), idx + 8, material(color(1.0f, 0.0f, 0.0f), 0.0f, 0.65f));
+	add_triangle(triangle(vertices[0], vertices[7], vertices[4], false), idx + 9, material(color(1.0f, 0.0f, 0.0f), 0.0f, 0.65f));
+
+	add_triangle(triangle(vertices[4], vertices[5], vertices[6], false), idx + 10, material(color(0.0f, 0.0f, 1.0f), 0.0f, 0.65f));
+	add_triangle(triangle(vertices[4], vertices[6], vertices[7], false), idx + 11, material(color(0.0f, 0.0f, 1.0f), 0.0f, 0.65f));
+}
+
 
 
 bool read_stl(const std::string& filename, material m, int start_idx) {
@@ -492,10 +519,11 @@ __global__ void divBuffer() {
 }
 
 int main() {
+	cudaFuncSetCacheConfig(updateKernel, cudaFuncCachePreferL1);
 	zeroBuffer << <256, scr_w* scr_h / 256 >> > ();
-	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -1.0f), material(color(0.0f, 1.0f, 0.0f), 0.0f, 0.4f), 0);
-	initialize_cube(100.0f, vec3(-200.0f, 130.0f, 100.0f), material(color(1.0f, 0.0f, 0.0f), 8.0f, 0.0f), 12);
-	initialize_cube(100.0f, vec3(100.0f, -100.0f, 100.0f), material(color(0.0f, 0.0f, 1.0f), 3.0f, 0.0f), 24);
+	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -1.0f), material(color(1.0f, 1.0f, 1.0f), 0.0f, 0.65f), 0);
+	initialize_cube(50.0f, vec3(200.0f, -200.0f, 200.0f), material(color(1.0f, 1.0f, 1.0f), 16.0f, 0.65f), 12);
+	initialize_cube(60.0f, vec3(-100.0f, 100.0f, 60.0f), material(color(1.0f, 0.0f, 0.0f), 0.0f, 0.0f), 24);
 	//add_triangle(triangle(vec3(-11.0f, 82.0f, 3.0f), vec3(-12.0f, 80.0f, 7.0f), vec3(-3.0f, 88.0f, 7.0f), false), 13, material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f));
 
 	//readStlModelAndAddTriangles(, material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f));
