@@ -528,20 +528,25 @@ int main() {
 
 	//readStlModelAndAddTriangles(, material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f));
 	//process_stl_file("C:\\Users\\david\\Downloads\\pythonAndModels\\Knight.stl", material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f), 0);
-	clock_t start, end;
-	start = clock();
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start); cudaEventCreate(&stop);
+	cudaEventRecord(start, 0);
 	for (int f = 0; f < num_frames; f++) {
 		updateKernel << <threads_main, blocks_main >> > (f);
 	}
 	cudaDeviceSynchronize();
-	end = clock();
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(stop);
 	divBuffer << <256, scr_w* scr_h / 256 >> > ();
 	color* sc = (color*)malloc(sizeof(color) * scr_w * scr_h);
 	copyScreenBuffer(sc);
 	cudaDeviceSynchronize();
 	saveBMP("out.bmp", scr_w, scr_h, sc);
 	cudaError_t e = cudaGetLastError();
-	printf("kernel calls took %d miliseconds\n", end - start);
+
+	float elapsedTime;
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+	printf("kernel calls took %f miliseconds\n", elapsedTime);
 	printf("Kernel exited with error: %s\n", cudaGetErrorString(e));
 	free(sc);
 	cudaFree(screen_buffer);
