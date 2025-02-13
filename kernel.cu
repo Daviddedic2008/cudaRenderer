@@ -13,7 +13,7 @@
 #include <sstream>
 
 // macros for sizes
-#define num_triangles 24
+#define num_triangles 36
 #define scr_w 512
 #define scr_h 512
 #define triangles_per_load 256
@@ -21,10 +21,10 @@
 #define fov 0.003f
 
 // tracer related macros
-#define num_bounces 4
-#define num_frames 100
+#define num_bounces 8
+#define num_frames 1000
 #define blur 0.01f
-#define smoothing_constant 0.4
+#define smoothing_constant 0.3
 
 // macros for gpu params
 #define threads_main 512
@@ -103,6 +103,10 @@ struct color{
 
 	inline __host__ __device__ color operator*(const float f) const {
 		return color(r * f, g * f, b * f);
+	}
+
+	inline __host__ __device__ color operator*(const color c) const {
+		return color(r * c.r, g * c.g, b * c.b);
 	}
 };
 
@@ -224,21 +228,21 @@ __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect, const float ran
 	// Specular reflection
 	fbitwise dt;
 	dt.f = dot(r.direction, nv);
-	const vec3 nv2 = nv * (-2 * (dt.f < 0.0f) + 1);
 	//dt.s &= 0x7FFFFFFF;  // Ensure dt is positive
 
-	// Corrected reflection direction
-	const vec3 dir = r.direction - nv2 * (2 * dt.f);
 
-	// Random reflection
+	const vec3 dir = r.direction - nv * (2 * dt.f);
+
 	const unsigned int state = (threadIdx.x + blockIdx.x * blockDim.x) * (iteration + 1);
 	const vec3 ran = vec3(randomValNormalDistribution(state), randomValNormalDistribution(state * 2), randomValNormalDistribution(state * 3)).normalize();
 
-	// Blend directions
 	r.direction = ((dir * (1.0f - random_strength)) + (ran * random_strength)).normalize();
 
 	return r;
 }
+
+
+
 
 
 
@@ -289,7 +293,7 @@ __global__ void updateKernel(const int iteration) {
 
 	intersect_return ret;
 	unsigned char num_hits = 0;
-	color c = color(0.0f, 0.0f, 0.0f);
+	color c = color(1.0f, 1.0f, 1.0f);
 	material m;
 	for (int b = 0; b < num_bounces; b++) {
 		int tri_id = -1;
@@ -310,7 +314,7 @@ __global__ void updateKernel(const int iteration) {
 		// bounces ray and does color addition to buffer
 		m = ((material*)triangle_materials)[tri_id];
 		r = reflect_ray(r, ret.nv, ret.intersect, m.roughness, iteration);
-		c = m.c * (smoothing_constant) + c * (1.0f-smoothing_constant);
+		c = m.c * c;
 		if (m.brightness > 0.0f) {
 			break;
 		}
@@ -318,7 +322,7 @@ __global__ void updateKernel(const int iteration) {
 	if (num_hits == 0) { return; }
 
 	// divide color by total num ints
-	((color*)screen_buffer)[idx] = ((color*)screen_buffer)[idx] + c * m.brightness;
+	((color*)screen_buffer)[idx] = (((color*)screen_buffer)[idx] + c * m.brightness);
 }
 
 // copying func
@@ -542,8 +546,9 @@ __global__ void divBuffer() {
 int main() {
 	cudaFuncSetCacheConfig(updateKernel, cudaFuncCachePreferL1);
 	zeroBuffer << <256, scr_w* scr_h / 256 >> > ();
-	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -1.0f), material(color(1.0f, 1.0f, 1.0f), 0.0f, 0.9f), 0);
-	initialize_cube(50.0f, vec3(-25.0f, -300.0f, 100.0f), material(color(1.0f, 1.0f, 1.0f), 50.0f, 0.0f), 12);
+	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -10.0f), material(color(0.1f, 0.1f, 1.0f), 0.0f, 0.7f), 0);
+	initialize_cube(50.0f, vec3(-25.0f, -270.0f, 100.0f), material(color(1.0f, 1.0f, 1.0f), 100.0f, 0.0f), 12);
+	initialize_cube(100.0f, vec3(-100.0f, 150.0f, 150.0f), material(color(1.0f, 0.1f, 0.1f), 0.0f, 0.7f), 24);
 	//initialize_cube(60.0f, vec3(-100.0f, 100.0f, 60.0f), material(color(1.0f, 0.0f, 0.0f), 0.0f, 1.0f), 24);
 	//add_triangle(triangle(vec3(-11.0f, 82.0f, 3.0f), vec3(-12.0f, 80.0f, 7.0f), vec3(-3.0f, 88.0f, 7.0f), false), 13, material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f));
 
