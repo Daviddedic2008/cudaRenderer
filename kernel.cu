@@ -13,7 +13,7 @@
 #include <sstream>
 
 // macros for sizes
-#define num_triangles 36
+#define num_triangles 24
 #define scr_w 512
 #define scr_h 512
 #define triangles_per_load 256
@@ -21,7 +21,7 @@
 #define fov 0.003f
 
 // tracer related macros
-#define num_bounces 8
+#define num_bounces 4
 #define num_frames 100
 #define blur 0.01f
 #define smoothing_constant 0.4
@@ -36,11 +36,24 @@
 #define matgnitude(vec3_a) (sqrtf(dot(vec3_a, vec3_a)))
 
 // too lazy to set up cudas rng so i use this bad one
-inline __host__ __device__ long int xorRand(unsigned int seed) {
+inline __host__ __device__ float xorRand(unsigned int seed) {
 	seed ^= seed << 13;
 	seed ^= seed >> 17;
 	seed ^= seed << 5;
 	return seed;
+}
+
+inline __device__ float xorRandf(unsigned int seed) {
+	seed ^= seed << 13;
+	seed ^= seed >> 17;
+	seed ^= seed << 5;
+	return ((seed % 1000)/999.0f);
+}
+
+inline __device__ float randomValNormalDistribution(const long int state) {
+	const float rnd = xorRandf(state);
+	const float rnd2 = xorRandf(state ^ 1023012);
+	return __fsqrt_rn(-2 * __logf(rnd)) * __cosf(2 * 3.141592653 * rnd2);
 }
 
 // Define the vec3 struct
@@ -207,19 +220,27 @@ inline __device__ intersect_return get_closest_intersect_in_load(const int pass,
 	return find_closest_int((triangle*)triangle_loader, r, (tbd < triangles_per_load) * (tbd - triangles_per_load) + triangles_per_load);
 }
 
-inline __device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect, const float random_strength, const unsigned int iteration) {
-	// specular
-	const float dt = dot(r.direction, nv);
-	const vec3 dir = (r.direction - (r.direction - nv * dt) * 2) * -1;
+__device__ ray reflect_ray(ray r, vec3 nv, const vec3 intersect, const float random_strength, const unsigned int iteration) {
+	// Specular reflection
+	fbitwise dt;
+	dt.f = dot(r.direction, nv);
+	const vec3 nv2 = nv * (-2 * (dt.f < 0.0f) + 1);
+	//dt.s &= 0x7FFFFFFF;  // Ensure dt is positive
 
-	// random reflection
-	const unsigned int randx = xorRand((threadIdx.x + blockIdx.x * blockDim.x) * (iteration+1) + 1223);
-	const unsigned int randy = xorRand(randx);
-	const unsigned int randz = xorRand(randy);
-	const vec3 ran = cross(vec3((randx % 1001) / 500.0f - 1.0f, (randy % 1001) / 500.0f - 1.0f, (randz % 1001) / 500.0f - 1.0f), nv);
-	r.direction = ((dir * (1.0f - random_strength)) + ran * random_strength).normalize();
+	// Corrected reflection direction
+	const vec3 dir = r.direction - nv2 * (2 * dt.f);
+
+	// Random reflection
+	const unsigned int state = (threadIdx.x + blockIdx.x * blockDim.x) * (iteration + 1);
+	const vec3 ran = vec3(randomValNormalDistribution(state), randomValNormalDistribution(state * 2), randomValNormalDistribution(state * 3)).normalize();
+
+	// Blend directions
+	r.direction = ((dir * (1.0f - random_strength)) + (ran * random_strength)).normalize();
+
 	return r;
 }
+
+
 
 inline __device__ ray initialize_rays(const int idx, const int iteration) {
 	const float x = idx % scr_w - scr_w / 2;
@@ -521,9 +542,9 @@ __global__ void divBuffer() {
 int main() {
 	cudaFuncSetCacheConfig(updateKernel, cudaFuncCachePreferL1);
 	zeroBuffer << <256, scr_w* scr_h / 256 >> > ();
-	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -1.0f), material(color(1.0f, 1.0f, 1.0f), 0.0f, 0.65f), 0);
-	initialize_cube(50.0f, vec3(200.0f, -200.0f, 200.0f), material(color(1.0f, 1.0f, 1.0f), 16.0f, 0.65f), 12);
-	initialize_cube(60.0f, vec3(-100.0f, 100.0f, 60.0f), material(color(1.0f, 0.0f, 0.0f), 0.0f, 0.0f), 24);
+	initialize_cube(512.0f, vec3(-256.0f, -256.0f, -1.0f), material(color(1.0f, 1.0f, 1.0f), 0.0f, 0.9f), 0);
+	initialize_cube(50.0f, vec3(-25.0f, -300.0f, 100.0f), material(color(1.0f, 1.0f, 1.0f), 50.0f, 0.0f), 12);
+	//initialize_cube(60.0f, vec3(-100.0f, 100.0f, 60.0f), material(color(1.0f, 0.0f, 0.0f), 0.0f, 1.0f), 24);
 	//add_triangle(triangle(vec3(-11.0f, 82.0f, 3.0f), vec3(-12.0f, 80.0f, 7.0f), vec3(-3.0f, 88.0f, 7.0f), false), 13, material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f));
 
 	//readStlModelAndAddTriangles(, material(color(1.0f, 1.0f, 1.0f), 1.0f, 0.0f));
